@@ -2,10 +2,11 @@ package devfest.hackathon.devfestpneumoniadetector
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
-import android.util.Size
 import android.view.*
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -13,8 +14,17 @@ import androidx.camera.core.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.android.synthetic.main.activity_main.*
+import org.tensorflow.lite.DataType
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.support.common.FileUtil
+import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.TensorImage
+import org.tensorflow.lite.support.image.ops.ResizeOp
+import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executors
+
 
 class MainActivity : AppCompatActivity() {
 
@@ -27,7 +37,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        setSupportActionBar(toolbar)
 
         viewFinder = findViewById(R.id.view_finder)
 
@@ -48,8 +57,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var viewFinder: TextureView
 
     private fun startCamera() {
+        val screenAspectRatio = AspectRatio.RATIO_16_9
+
         val previewConfig = PreviewConfig.Builder().apply {
-            setTargetResolution(Size(640, 480))
+            setTargetAspectRatio(screenAspectRatio)
+            setTargetRotation(viewFinder.display.rotation)
         }.build()
 
         val preview = Preview(previewConfig)
@@ -71,8 +83,10 @@ class MainActivity : AppCompatActivity() {
         // Build the image capture use case and attach button click listener
         val imageCapture = ImageCapture(imageCaptureConfig)
         fab.setOnClickListener {
-            val file = File(externalMediaDirs.first(),
-                "${System.currentTimeMillis()}.jpg")
+            val file = File(
+                externalMediaDirs.first(),
+                "${System.currentTimeMillis()}.jpg"
+            )
 
             imageCapture.takePicture(file, executor,
                 object : ImageCapture.OnImageSavedListener {
@@ -91,14 +105,59 @@ class MainActivity : AppCompatActivity() {
                     override fun onImageSaved(file: File) {
                         val msg = "Photo capture succeeded: ${file.absolutePath}"
                         Log.d("CameraXApp", msg)
+
+                        val result = hasPneumonia(file)
+
                         viewFinder.post {
-                            Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
+                            if (result)
+                                Toast.makeText(baseContext, "Has Pneumonia!", Toast.LENGTH_LONG).show()
+                            else
+                                Toast.makeText(baseContext, "Clean lungs!", Toast.LENGTH_LONG).show()
                         }
                     }
                 })
         }
 
         CameraX.bindToLifecycle(this, preview, imageCapture)
+    }
+
+    private fun hasPneumonia(file: File): Boolean {
+
+        val bitmapOptions = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath, bitmapOptions)
+
+        val inputRes = 300
+        val imageProcessor = ImageProcessor.Builder()
+            .add(ResizeOp(inputRes, inputRes, ResizeOp.ResizeMethod.BILINEAR))
+            .build()
+
+        var tImage = TensorImage(DataType.FLOAT32)
+
+        tImage.load(bitmap)
+        tImage = imageProcessor.process(tImage)
+
+        val probabilityBuffer = TensorBuffer.createFixedSize(intArrayOf(1), DataType.FLOAT32)
+
+        var tflite: Interpreter? = null
+
+        try {
+            val tfliteModel = FileUtil.loadMappedFile(
+                this,
+                "model5.tflite"
+            )
+            tflite = Interpreter(tfliteModel, Interpreter.Options().apply {
+                setNumThreads(1)
+            })
+        } catch (e: IOException) {
+            Log.e("tfliteSupport", "Error reading model", e)
+        }
+
+        tflite?.run(tImage.buffer, probabilityBuffer.buffer)
+
+        return probabilityBuffer.floatArray.first() != 0f
     }
 
     private fun updateTransform() {
